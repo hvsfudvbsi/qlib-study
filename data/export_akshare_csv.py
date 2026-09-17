@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""akshare A 股日线导出 → qlib dump_bin 规范 CSV。
+"""akshare A 股日线导出 → qlib dump_bin 规范 CSV + instruments 股票池文件。
 
 输出规范（对应 scripts/dump_bin.py dump_all 的要求，见 qlib 官方文档 Data Preparation）：
-- 每只股票一个 CSV，文件名即证券代码（如 SH600000.csv），首列 date，小写列名
-- 列：date, symbol, open, high, low, close, volume, factor[, amount, turnover]
+- 每只股票一个 CSV，文件名即证券代码（如 SH600000.csv），小写列名
+- 列：date, symbol, open, close, high, low, volume, factor
 - open/close/high/low/volume 为**前复权价**，factor = qfq/raw，使 $close/$factor == 真实价
+- **停牌日补齐**：交易日历上股票缺的行补 NaN（qlib 约定：停牌日 OHLCV/factor 全 NaN），
+  范围为该股票首个~最后一个有数据日之间；同时保证小批量导出时 dump 日历完整
+- **instruments 文件**：输出 <out-dir>/instruments/all.txt 及自定义池
+  （qlib 格式：`SH600000\\t2024-01-02\\t2025-09-17`，起止为股票自身有数据的日期）
 
 数据源（--source）：
 - tx（默认）腾讯 stock_zh_a_hist_tx：限流宽松；qfq 为等差复权，
@@ -12,13 +16,16 @@
 - em 东财 stock_zh_a_hist：等比复权、factor 分段恒定（更标准），但限流严格；
   在被限流的 IP 上会 ConnectionError/超时，可改用 tx 或稍后再试
 
-复权口径提示：严格无放漏的复权需送转/分红明细自行构建因子，
-生产环境建议 tushare pro（pro_bar adj="qf"）或券商数据，见 data/README.md。
+交易日历：固定取腾讯上证指数（sh000001）日线（与 --source 无关）；
+接口失败时降级为「已导出股票的日期并集」（整批同日停牌的极小概率场景会漏日）。
 
 用法：
-    python export_akshare_csv.py --symbols sh600000 sz000001 sh600519 \
-        --start 20240101 --end 20250917 --out-dir csv_cn
-    # 导出后转 qlib .bin（详见 data/README.md）
+    # 导出并生成自定义股票池 mypool（可多次 --pool 定义多个池）
+    python export_akshare_csv.py --symbols sh600000 sz000001 sh600519 \\
+        --start 20240101 --end 20250917 --out-dir csv_cn \\
+        --pool mypool=sh600000,sh600519
+
+    # 导出后转 qlib .bin，并拷贝股票池文件（详见 data/README.md）
 """
 
 from __future__ import annotations
@@ -33,7 +40,7 @@ import pandas as pd
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF = (5, 15, 30)  # 秒，指数退避
 COLS_OUT = ["date", "symbol", "open", "close", "high", "low", "volume", "factor"]
-COLS_OUT_EXTRA = COLS_OUT + ["amount", "turnover"]
+INDEX_SYMBOL = "sh000001"  # 腾讯源上证指数，用作交易日历
 
 
 def norm_symbol(sym: str) -> tuple[str, str]:
@@ -84,8 +91,22 @@ def fetch_with_retry(code: str, start: str, end: str, source: str):
     raise RuntimeError(f"{code} 拉取失败（{source} 源重试 {RETRY_ATTEMPTS} 次）") from last
 
 
+def fetch_calendar_tx(start: str, end: str) -> list[str] | None:
+    """腾讯上证指数日线作为交易日历（YYYY-MM-DD 字符串列表）；失败返回 None。"""
+    try:
+        import akshare as ak
+
+        df = ak.stock_zh_a_hist_tx(symbol=INDEX_SYMBOL, start_date=start, end_date=end, adjust="")
+        days = sorted(df["date"].astype(str).tolist())
+        print(f"交易日历（腾讯{INDEX_SYMBOL}）: {len(days)} 天, {days[0]} ~ {days[-1]}")
+        return days
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 指数日历获取失败（{type(e).__name__}: {str(e)[:60]}），降级为股票日期并集")
+        return None
+
+
 def build_csv(raw: pd.DataFrame, qfq: pd.DataFrame, symbol: str, source: str) -> pd.DataFrame:
-    """合并不复权与 qfq 数据，产出 dump_bin 规范 DataFrame。"""
+    """合并不复权与 qfq 数据，产出 dump_bin 规范 DataFrame（不含停牌补齐）。"""
     is_em = source == "em"
     d, o, c, h, l, v = ("日期", "开盘", "收盘", "最高", "最低", "成交量") if is_em else \
                        ("date", "open", "close", "high", "low", "volume")
@@ -99,6 +120,7 @@ def build_csv(raw: pd.DataFrame, qfq: pd.DataFrame, symbol: str, source: str) ->
         raise RuntimeError(f"{symbol} 合并后无数据")
 
     df = df.rename(columns={d: "date"})
+    df["date"] = df["date"].astype(str)
     # qlib 口径：OHLCV 存前复权价，factor = qfq/raw，$close/$factor == 真实价
     for col in ("open", "close", "high", "low"):
         df[col] = df[f"{col}_qfq"]
@@ -120,7 +142,67 @@ def build_csv(raw: pd.DataFrame, qfq: pd.DataFrame, symbol: str, source: str) ->
     df["symbol"] = symbol
     for col in ("open", "close", "high", "low", "volume", "factor"):
         df[col] = pd.to_numeric(df[col], errors="coerce").round(6)
-    return df[COLS_OUT]
+    return df[COLS_OUT].sort_values("date").reset_index(drop=True)
+
+
+def backfill_suspend_days(df: pd.DataFrame, calendar: list[str], symbol: str) -> pd.DataFrame:
+    """按交易日历补齐股票缺行（停牌日）：范围内缺失日补一行，OHLCV/factor 全 NaN。
+
+    qlib 约定停牌日数据为 NaN（官方 yahoo collector 同样置 NaN）；
+    dump_bin 虽会按日历 reindex，但显式补行可保证小批量导出时日历 union 完整。
+    """
+    dates = set(df["date"])
+    first, last = df["date"].min(), df["date"].max()
+    missing = [d for d in calendar if first <= d <= last and d not in dates]
+    if not missing:
+        return df
+    nan_rows = pd.DataFrame({"date": missing, "symbol": symbol, **{c: float("nan") for c in COLS_OUT[2:]}})
+    out = pd.concat([df, nan_rows], ignore_index=True).sort_values("date").reset_index(drop=True)
+    print(f"  [suspend] {symbol} 补齐停牌/缺行 {len(missing)} 天: {missing[0]}~{missing[-1]}")
+    return out
+
+
+def write_instruments(out_dir: Path, ranges: dict[str, tuple[str, str]], pools: dict[str, list[str]]) -> None:
+    """生成 qlib instruments 文件：SYM<TAB>START<TAB>END（无表头）。
+
+    all.txt 恒生成（全部成功导出的股票）；pools 中每个自定义池生成同名文件。
+    起止日期取股票自身有数据的日期范围（不含补齐的 NaN 行）。
+    """
+    inst_dir = out_dir / "instruments"
+    inst_dir.mkdir(parents=True, exist_ok=True)
+    all_syms = sorted(ranges)
+    (inst_dir / "all.txt").write_text(
+        "\n".join(f"{s}\t{ranges[s][0]}\t{ranges[s][1]}" for s in all_syms) + "\n", encoding="utf-8"
+    )
+    print(f"instruments: {inst_dir / 'all.txt'} ({len(all_syms)} 只)")
+    for pool, raw_syms in pools.items():
+        syms = [norm_symbol(s)[0] for s in raw_syms]  # 兼容直接调用时未大写化的代码
+        unknown = [s for s in syms if s not in ranges]
+        if unknown:
+            print(f"[warn] 股票池 {pool} 含未导出成功/未声明的代码: {unknown}，已跳过")
+        valid = [s for s in syms if s in ranges]
+        if not valid:
+            continue
+        (inst_dir / f"{pool}.txt").write_text(
+            "\n".join(f"{s}\t{ranges[s][0]}\t{ranges[s][1]}" for s in sorted(valid)) + "\n", encoding="utf-8"
+        )
+        print(f"instruments: {inst_dir / (pool + '.txt')} ({len(valid)} 只)")
+
+
+def parse_pools(pairs: list[str] | None) -> dict[str, list[str]]:
+    """解析 --pool mypool=sh600000,sh600519 为 {'mypool': ['SH600000', 'SH600519']}。"""
+    pools: dict[str, list[str]] = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            raise ValueError(f"--pool 格式应为 名称=代码1,代码2，得到: {pair!r}")
+        name, syms = pair.split("=", 1)
+        name = name.strip()
+        if not name or not syms.strip():
+            raise ValueError(f"--pool 名称或代码为空: {pair!r}")
+        if name in pools:
+            raise ValueError(f"--pool 名称重复: {name}")
+        pools[name] = [norm_symbol(s)[0] for s in syms.split(",") if s.strip()]
+    return pools
 
 
 def main() -> int:
@@ -133,37 +215,58 @@ def main() -> int:
     ap.add_argument("--source", choices=("tx", "em"), default="tx",
                     help="tx=腾讯（默认，限流宽松/等差复权）；em=东财（等比复权/限流严格）")
     ap.add_argument("--sleep", type=float, default=2.0, help="每只股票之间的间隔秒数")
+    ap.add_argument("--pool", action="append", default=[], metavar="NAME=SYM,SYM",
+                    help="自定义股票池，可重复：--pool mypool=sh600000,sh600519")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    pools = parse_pools(args.pool)
 
-    ok, failed = [], []
+    # 1) 逐只拉取并构建
+    frames: dict[str, pd.DataFrame] = {}
+    failed: list[str] = []
     for i, raw_sym in enumerate(args.symbols):
         symbol, code = norm_symbol(raw_sym)
         print(f"[{i + 1}/{len(args.symbols)}] {symbol} ({args.source} 源, {args.start}~{args.end})")
         try:
             raw_df, qfq_df = fetch_with_retry(code, args.start, args.end, args.source)
-            df = build_csv(raw_df, qfq_df, symbol, args.source)
+            frames[symbol] = build_csv(raw_df, qfq_df, symbol, args.source)
         except Exception as e:  # noqa: BLE001 单只失败不中断整批
             print(f"  [FAIL] {symbol}: {type(e).__name__}: {str(e)[:100]}")
             failed.append(symbol)
-            continue
-        path = out_dir / f"{symbol}.csv"
-        df.to_csv(path, index=False)
-        ok.append(symbol)
-        print(f"  -> {path}  rows={len(df)}  {df['date'].iloc[0]}~{df['date'].iloc[-1]}  "
-              f"factor末值={df['factor'].iloc[-1]:.4f}")
         if i < len(args.symbols) - 1:
             time.sleep(args.sleep)
 
-    print(f"\n完成: {len(ok)} 成功, {len(failed)} 失败" + (f": {failed}" if failed else ""))
-    if ok:
-        print("下一步（转 qlib .bin）:")
-        print(f"  python <qlib仓库>/scripts/dump_bin.py dump_all --data_path {out_dir} "
-              f"--qlib_dir ~/.qlib/qlib_data/my_cn_data "
-              f"--include_fields open,close,high,low,volume,factor "
-              f"--date_field_name date --symbol_field_name symbol")
+    if not frames:
+        print("无任何股票导出成功")
+        return 1
+
+    # 2) 交易日历 + 停牌补齐 + 写 CSV
+    calendar = fetch_calendar_tx(args.start, args.end)
+    if calendar is None:  # 降级：已导出股票日期并集
+        calendar = sorted(set().union(*[set(f["date"]) for f in frames.values()]))
+        print(f"交易日历（并集降级）: {len(calendar)} 天")
+
+    ranges: dict[str, tuple[str, str]] = {}
+    for symbol, df in frames.items():
+        df = backfill_suspend_days(df, calendar, symbol)
+        ranges[symbol] = (df["date"].min(), df["date"].max())
+        path = out_dir / f"{symbol}.csv"
+        df.to_csv(path, index=False)
+        print(f"  -> {path}  rows={len(df)}  {ranges[symbol][0]}~{ranges[symbol][1]}  "
+              f"factor末值={df['factor'].iloc[-1]:.4f}")
+
+    # 3) instruments 文件
+    write_instruments(out_dir, ranges, pools)
+
+    print(f"\n完成: {len(frames)} 成功, {len(failed)} 失败" + (f": {failed}" if failed else ""))
+    print("下一步（转 qlib .bin 并挂载股票池）:")
+    print(f"  python <qlib仓库>/scripts/dump_bin.py dump_all --data_path {out_dir} "
+          f"--qlib_dir ~/.qlib/qlib_data/my_cn_data "
+          f"--include_fields open,close,high,low,volume,factor "
+          f"--date_field_name date --symbol_field_name symbol")
+    print(f"  cp {out_dir}/instruments/*.txt ~/.qlib/qlib_data/my_cn_data/instruments/")
     return 1 if failed else 0
 
 

@@ -4,8 +4,28 @@
 
 ## 文件
 
-- `export_akshare_csv.py`：导出脚本（每股票一个 CSV，文件名即代码，列：date, symbol, open, close, high, low, volume, factor）
-- `csv_cn/`：导出的 CSV（已 gitignore，不入库）
+- `export_akshare_csv.py`：导出脚本（每股票一个 CSV，文件名即代码，列：date, symbol, open, close, high, low, volume, factor；含停牌日 NaN 补齐与 instruments 股票池生成）
+- `csv_cn/`：导出的 CSV 与 instruments/（已 gitignore，不入库）
+
+## 停牌日与股票池（v2 新增，已实测）
+
+- **停牌补齐**：按交易日历补齐股票缺行（范围内缺行 OHLCV/factor 全 NaN，qlib 约定）；交易日历默认取腾讯上证指数日线，接口失败自动降级为已导出股票日期并集
+- **自定义股票池**：`--pool 名称=代码,代码`（可重复），生成 `<out-dir>/instruments/<名称>.txt`；`all.txt` 恒生成
+- **挂载使用**：把 instruments/*.txt 拷入 qlib 数据目录后，代码里 `D.instruments('banks')` / `D.list_instruments(...)` 即可按池取数
+
+```bash
+# 导出并生成两个股票池
+cd data
+../.venv/bin/python export_akshare_csv.py --symbols sh600000 sz000001 sh600519 \
+    --start 20240101 --end 20250917 --out-dir csv_cn \
+    --pool banks=sh600000,sz000001 --pool core=sh600519
+
+# dump 后拷贝股票池文件
+cp csv_cn/instruments/*.txt ~/.qlib/qlib_data/my_cn_data/instruments/
+
+# qlib 按池取数
+#   D.features(D.instruments('banks'), ['$close/$factor'], ...)
+```
 
 ## 快速开始
 
@@ -50,12 +70,14 @@ print(D.features(['SH600000'], ['\$close','\$factor','\$close/\$factor'], start_
 qlib 约定：`$close/$factor` = 真实价，`factor = 复权价/真实价`。本脚本直接存 qfq 价并令 `factor = qfq/raw` 满足该代数关系。
 
 - **tx 等差复权的失真**：等差下 `qfq/raw` 不是常数，跨除权日计算的收益率与真实复权收益率存在微小偏差（分红比例越大偏差越大）
-- **已知缺陷**：本脚本未处理停牌日补齐（停牌日直接缺行）；后续做滚动训练前应补齐交易日历并置 NaN（qlib dump 约定）
 - **已知缺陷**：未含退市股（幸存者偏差），构建严肃回测时需专门处理
 
-## 实测记录（2026-09-17）
+注：停牌日补齐已在 v2 实现（交易日历缺行补 NaN），dump_bin 的 `data_merge_calendar` 也会按日历 reindex 兜底；显式补行的价值在于保证小批量导出时日历 union 完整。
 
-- 3 只股票（浦发/平安/茅台）各 416 行，2024-01-02 ~ 2025-09-17
-- dump_bin → `features/{sh600000,sh600519,sz000001}/{close,open,high,low,volume,factor}.day.bin`
+## 实测记录（2026-09-17，v2）
+
+- 3 只股票（浦发/平安/茅台）各 416 行，2024-01-02 ~ 2025-09-17（当期无停牌，416 = 日历天数）
+- 合成数据单测：停牌日补 NaN、范围边界（上市前/末日之后不补）、instruments 格式与大小写兜底全部通过
+- dump 后 `D.list_instruments(D.instruments('banks'))` 精确返回池成员 `['SH600000','SZ000001']`，按池取数正常
 - `check_data_health` 仅 1 条提示：SZ000001 在 2024-02-21 成交量跳变 3.5 倍（真实行情事件，非数据错误）
-- qlib 冒烟：`$close/$factor` 精确还原真实价（浦发 12.96 / 茅台 1493.00），日历 416 天，`instruments/all.txt` 格式正确
+- qlib 冒烟：`$close/$factor` 精确还原真实价（浦发 12.96 / 茅台 1493.00）
