@@ -14,34 +14,41 @@
 
 ## 环境要求
 
-- Python 3.10（conda 建议独立环境 `qlib`）
-- pyqlib（`pip install pyqlib`；版本敏感，报错先查官方 issues）
-- Qlib 官方 A 股数据（约 400MB，`scripts/get_data.py` 下载）
+- Python 3.10~3.12（第 1 周实测 3.12 可用，pyqlib 0.9.7 有 cp312 wheel）
+- pyqlib + 钉版本的 numpy/pandas/plotly（组合见下），另需 statsmodels、MLFLOW_ALLOW_FILE_STORE=true
+- Qlib 官方 A 股数据（521M，日频 1999~2020-09）
 
-## 快速开始
+## 快速开始（已在第 1 周验证可用）
 
 ```bash
-# 1. 环境
-conda create -n qlib python=3.10 -y
-conda activate qlib
-pip install pyqlib jupyter
+# 1. 环境：Python 3.10~3.12 均可，无需 conda（踩坑详情见 notes/week01.md）
+python3 -m venv .venv
+.venv/bin/pip install pyqlib
+.venv/bin/pip install "numpy==2.0.2" "pandas==2.2.3" "plotly==5.24.1" statsmodels
 
-# 2. 下载官方 A 股数据（cn_data）
-python scripts/get_data.py qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn
+# 2. 下载官方 A 股数据（521M，日频覆盖 1999-11-10 ~ 2020-09-25）
+git clone --depth 1 https://github.com/microsoft/qlib.git /root/mywork/qlib-src
+/root/mywork/qlib-study/.venv/bin/python /root/mywork/qlib-src/scripts/get_data.py \
+    qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn
 
-# 3. 跑通官方入门 notebook（第 1 周任务）
-jupyter notebook examples/tutorial/workflow_by_code.ipynb
+# 3. 跑通官方入门 notebook（第 1 周任务；注意路径在 examples/ 根目录，不在 tutorial/）
+jupyter notebook /root/mywork/qlib-src/examples/workflow_by_code.ipynb
 
 # 4. qrun 配置驱动全流程（第 3 周任务）
-qrun examples/benchmarks/LightGBM/workflow_config_lightgbm_Alpha158.yaml
+qrun /root/mywork/qlib-src/examples/benchmarks/LightGBM/workflow_config_lightgbm_Alpha158.yaml
 ```
+
+> **mlflow 兼容**：新版 mlflow 需加环境变量 `MLFLOW_ALLOW_FILE_STORE=true` 再跑 qlib 实验跟踪。
+> **依赖为什么这样钉**：pandas 3.x / plotly 7.x 与 pyqlib 0.9.7 不兼容，numpy 又被 scipy 钉在 >=2.0，详见 [`notes/week01.md`](notes/week01.md)。
 
 ## 目录结构
 
 ```
 qlib-study/
 ├── STUDY_PLAN.md        12 周完整学习计划（含验收标准与常见坑）
-├── notes/               每周小结与踩坑记录（学习中逐步补充）
+├── notes/               每周小结与踩坑记录
+│   └── week01.md        ✅ 第 1 周：环境搭建+全流程跑通，10 个坑与最终指标
+├── runs/week01/         第 1 周运行工件（run_nb.py + mlruns 实验跟踪）
 ├── notebooks/           练习用 notebook（学习中逐步补充）
 ├── workflows/           自定义 qrun yaml 配置（学习中逐步补充）
 └── data/                自备 CSV 数据与转换脚本（学习中逐步补充）

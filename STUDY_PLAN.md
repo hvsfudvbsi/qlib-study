@@ -48,11 +48,13 @@
 - notebook 全流程无报错跑完；能口头解释 provider_uri、region、handler、dataset、strategy 各是什么
 - 写一篇《安装踩坑记录》
 
+**已执行（2026-09-17）**：✅ 全流程跑通，IC≈0.05、含成本年化超额 +17.4%。实际用 venv + 系统 Python 3.12（无需 conda，pyqlib 0.9.7 有 cp312 wheel）；踩了 10 个坑（pandas 3.x 不兼容、plotly 需 5.x、MLFLOW_ALLOW_FILE_STORE 等），全部记录在 [`notes/week01.md`](notes/week01.md)。注意：**notebook 实际路径在 `examples/` 根目录**，不在 tutorial/。
+
 **常用命令**：
 
 ```bash
 python scripts/get_data.py qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn
-jupyter notebook examples/tutorial/workflow_by_code.ipynb
+jupyter notebook examples/workflow_by_code.ipynb   # 注意：不在 examples/tutorial/ 下
 ```
 
 ### 第 2 周：Data Handler 与 Alpha158 深入
@@ -165,6 +167,7 @@ task:
 1. 修改 topk（10/30/50）、n_drop（1/3/5）做网格观察
 2. 对比 CSI300 / CSI500 股票池下的回测差异
 3. 解读并复述每张报告图的含义
+4. 验证第 1 周遗留坑：官方 cn_data 疑似缺 `factor.day.bin`，回测退化为 adjusted_price 模式、`trade_unit=100` 约束失效（见 notes/week01.md 运行期警告），评估对成交模拟与指标的影响
 
 **验收**：能用一页纸说清"从模型预测分数到最终回测报告"的完整链路；理解涨跌停/停牌如何被 qlib 处理
 
@@ -324,7 +327,7 @@ python scripts/check_data_health.py check_data --qlib_dir ~/.qlib/qlib_data/my_c
 4. **幸存者偏差**：退市股缺失会让回测虚高，自建数据时尽量包含退市股
 5. **Yahoo 数据源质量**：官方 collector 依赖 Yahoo，国内网络不稳，A 股数据质量一般——第 6 周后强烈建议换 akshare/tushare 自建
 6. **qlib 数据更新**：官方数据集有截止日期，别直接拿"过期数据 + 未滚动训练"的模型做实盘决策
-7. **版本兼容**：pyqlib 对 numpy/pandas 版本敏感，报错先查 issues，固定依赖版本
+7. **版本兼容**：pyqlib 对 numpy/pandas/plotly 版本敏感。第 1 周实测可用组合：`numpy==2.0.2 + pandas==2.2.3 + plotly==5.24.1 + statsmodels`；pandas 3.x、plotly 7.x 直接炸，numpy 不能盲降 1.x（scipy 要求 >=2.0），新版 mlflow 需 `MLFLOW_ALLOW_FILE_STORE=true`，详见 notes/week01.md
 
 ---
 
@@ -343,7 +346,7 @@ python scripts/check_data_health.py check_data --qlib_dir ~/.qlib/qlib_data/my_c
 
 | 周 | 主题 | 状态 |
 |---|---|---|
-| 1 | 环境安装与快速体验 | ⬜ 未开始 |
+| 1 | 环境安装与快速体验 | ✅ 完成（notes/week01.md） |
 | 2 | Data Handler 与 Alpha158 | ⬜ 未开始 |
 | 3 | 模型训练与预测 | ⬜ 未开始 |
 | 4 | 回测与绩效评估 | ⬜ 未开始 |
