@@ -8,6 +8,7 @@ __pycache__/
 data/raw/
 data/bin/
 data/csv_cn/
+data/csv_selfdata/
 .qlib/
 
 # 实验产物
