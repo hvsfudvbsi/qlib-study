@@ -7,6 +7,7 @@ __pycache__/
 # qlib 本地数据与缓存（体积大，不入库）
 data/raw/
 data/bin/
+data/csv_cn/
 .qlib/
 
 # 实验产物
