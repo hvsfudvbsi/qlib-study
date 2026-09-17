@@ -10,7 +10,7 @@
 | M2 吃透四大组件 | 第 4~9 周 | 回测与指标、滚动训练、自有 A 股数据接入、组合策略 |
 | M3 毕业项目 | 第 10~12 周 | 完整选股系统、高频/深度模型选修、方法论沉淀 |
 
-完整的周计划、练习、验收标准与 A 股常见坑见 [`STUDY_PLAN.md`](STUDY_PLAN.md)。
+完整的周计划、练习、验收标准与 A 股常见坑见 [`STUDY_PLAN.md`](STUDY_PLAN.md)；Qlib 项目作用、架构与三种用法的详细使用说明见 [`QLIB_GUIDE.md`](QLIB_GUIDE.md)（基于 fork [hvsfudvbsi/qlib](https://github.com/hvsfudvbsi/qlib)，本地 `/root/mywork/qlib`）。
 
 ## 环境要求
 
