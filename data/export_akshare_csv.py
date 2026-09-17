@@ -56,21 +56,26 @@ def norm_symbol(sym: str) -> tuple[str, str]:
     return exchange + code, code
 
 
-def fetch_tx(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """腾讯源：返回 (不复权 df, qfq df)，英文列名。volume 单位=股。"""
+def fetch_tx(symbol: str, code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """腾讯源：返回 (不复权 df, qfq df)，英文列名。volume 单位=股。
+
+    直接使用规范化后的完整代码（sh600000/sz000001，也支持指数 sh000001）。
+    """
     import akshare as ak
 
-    sym = ("sh" if code[0] == "6" else "bj" if code[0] in ("48") else "sz") + code
+    sym = symbol.lower()
     raw = ak.stock_zh_a_hist_tx(symbol=sym, start_date=start, end_date=end, adjust="")
     time.sleep(2)
     qfq = ak.stock_zh_a_hist_tx(symbol=sym, start_date=start, end_date=end, adjust="qfq")
     return raw, qfq
 
 
-def fetch_em(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """东财源：返回 (不复权 df, qfq df)，中文列名。volume 单位=手。"""
+def fetch_em(symbol: str, code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """东财源：返回 (不复权 df, qfq df)，中文列名。volume 单位=手。仅支持个股。"""
     import akshare as ak
 
+    if symbol.startswith("SH") and code.startswith("0"):
+        raise ValueError(f"em 源不支持上证指数（{symbol}），benchmark 导出请用 --source tx")
     kw = dict(symbol=code, period="daily", start_date=start, end_date=end)
     raw = ak.stock_zh_a_hist(adjust="", **kw)
     time.sleep(2)
@@ -78,17 +83,19 @@ def fetch_em(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFram
     return raw, qfq
 
 
-def fetch_with_retry(code: str, start: str, end: str, source: str):
+def fetch_with_retry(symbol: str, code: str, start: str, end: str, source: str):
     fn = {"tx": fetch_tx, "em": fetch_em}[source]
     last: Exception | None = None
     for attempt, backoff in enumerate(RETRY_BACKOFF, 1):
         try:
-            return fn(code, start, end)
+            return fn(symbol, code, start, end)
+        except (TypeError, ValueError) as e:  # 程序类错误：参数/代码不合法，重试无意义
+            raise RuntimeError(f"{symbol} 调用参数错误（不重试）") from e
         except Exception as e:  # noqa: BLE001 网络类异常统一重试
             last = e
-            print(f"  [retry {attempt}/{RETRY_ATTEMPTS}] {code} {type(e).__name__}: {str(e)[:60]}; backoff {backoff}s")
+            print(f"  [retry {attempt}/{RETRY_ATTEMPTS}] {symbol} {type(e).__name__}: {str(e)[:60]}; backoff {backoff}s")
             time.sleep(backoff)
-    raise RuntimeError(f"{code} 拉取失败（{source} 源重试 {RETRY_ATTEMPTS} 次）") from last
+    raise RuntimeError(f"{symbol} 拉取失败（{source} 源重试 {RETRY_ATTEMPTS} 次）") from last
 
 
 def fetch_calendar_tx(start: str, end: str) -> list[str] | None:
@@ -230,7 +237,7 @@ def main() -> int:
         symbol, code = norm_symbol(raw_sym)
         print(f"[{i + 1}/{len(args.symbols)}] {symbol} ({args.source} 源, {args.start}~{args.end})")
         try:
-            raw_df, qfq_df = fetch_with_retry(code, args.start, args.end, args.source)
+            raw_df, qfq_df = fetch_with_retry(symbol, code, args.start, args.end, args.source)
             frames[symbol] = build_csv(raw_df, qfq_df, symbol, args.source)
         except Exception as e:  # noqa: BLE001 单只失败不中断整批
             print(f"  [FAIL] {symbol}: {type(e).__name__}: {str(e)[:100]}")

@@ -79,5 +79,6 @@ qlib 约定：`$close/$factor` = 真实价，`factor = 复权价/真实价`。�
 - 3 只股票（浦发/平安/茅台）各 416 行，2024-01-02 ~ 2025-09-17（当期无停牌，416 = 日历天数）
 - 合成数据单测：停牌日补 NaN、范围边界（上市前/末日之后不补）、instruments 格式与大小写兜底全部通过
 - dump 后 `D.list_instruments(D.instruments('banks'))` 精确返回池成员 `['SH600000','SZ000001']`，按池取数正常
+- **端到端训练验证**：3 股 + 上证指数（benchmark，tx 源 factor 恒 1.0）→ Alpha158+LGBM → IC 评估 → 含成本回测全链路通过（见 `runs/selfdata/README.md`；过程中修复指数代码反推交易所的 bug）
 - `check_data_health` 仅 1 条提示：SZ000001 在 2024-02-21 成交量跳变 3.5 倍（真实行情事件，非数据错误）
 - qlib 冒烟：`$close/$factor` 精确还原真实价（浦发 12.96 / 茅台 1493.00）
